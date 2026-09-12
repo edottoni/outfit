@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Matches the "navy" CSS variable in client/src/index.css so native chrome matches the web UI. -->
+    <color name="colorPrimary">#172f3f</color>
+    <color name="colorPrimaryDark">#0f2029</color>
+    <color name="colorAccent">#b88a4a</color>
+    <color name="ic_launcher_background">#172f3f</color>
+    <color name="splash_background">#172f3f</color>
+</resources>
