@@ -1,0 +1,104 @@
+workflows:
+  outfit-android:
+    name: Outfit Android
+    max_build_duration: 60
+    instance_type: mac_mini_m2
+    environment:
+      node: 22.13.0
+      # Capacitor 8.5.1 / AGP 8.13.x require JDK 21. Codemagic sets JAVA_HOME for us
+      # when this is declared here -- do NOT hardcode a JAVA_HOME path in gradle.properties,
+      # it would only work on one OS.
+      java: 21
+      vars:
+        PACKAGE_NAME: "com.outfit.app"
+        # Optional release signing inputs. Leave unset to build debug-only (default).
+        # To enable release builds, add these as encrypted variables in Codemagic
+        # (Settings > Environment variables), or via "Android code signing" in the
+        # app's Distribution settings, which auto-populates CM_KEYSTORE_PATH,
+        # CM_KEYSTORE_PASSWORD, CM_KEY_ALIAS and CM_KEY_PASSWORD after you upload
+        # your .jks/.keystore as a Secure file. Never put the keystore or its
+        # passwords directly in this file or in the repo.
+    scripts:
+      - name: Install pnpm
+        script: |
+          # Codemagic images ship a pnpm shim managed by Corepack at /usr/local/bin/pnpm.
+          # Corepack's signature verification is currently broken for pinned versions
+          # ("Cannot find matching keyid" -- an upstream Corepack bug, not this project),
+          # and it also blocks a plain `npm install -g pnpm` with EEXIST because the shim
+          # file is already there. --force tells npm to overwrite that shim with a real,
+          # non-Corepack pnpm binary, so nothing below ever touches Corepack again.
+          npm install -g pnpm@10.4.1 --force
+          pnpm -v
+
+      - name: Install dependencies
+        script: pnpm install --frozen-lockfile
+
+      - name: Build web application (React/Vite -> dist/public)
+        script: pnpm run build
+
+      - name: Capacitor sync (copies dist/public into android/app + refreshes plugin gradle files)
+        script: pnpm exec cap sync android
+
+      - name: Point Gradle at the CI's Android SDK
+        script: |
+          # local.properties is intentionally NOT committed (see android/.gitignore) because
+          # its sdk.dir is machine-specific. Codemagic exposes the SDK location via
+          # ANDROID_SDK_ROOT/ANDROID_HOME, so we write local.properties fresh on every build.
+          SDK_DIR="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          echo "sdk.dir=$SDK_DIR" > android/local.properties
+          cat android/local.properties
+
+      - name: Generate Gradle wrapper
+        script: |
+          # gradlew/gradlew.bat are committed, but the binary gradle-wrapper.jar is not
+          # (see android/.gitignore for why). Regenerate it deterministically here so the
+          # wrapper always matches gradle-wrapper.properties (Gradle 8.13), whether or not
+          # this CI image ships a system-wide `gradle`.
+          cd android
+          if command -v gradle >/dev/null 2>&1; then
+            gradle wrapper --gradle-version 8.13
+          else
+            curl -sSL -o /tmp/gradle-bin.zip https://services.gradle.org/distributions/gradle-8.13-bin.zip
+            unzip -q /tmp/gradle-bin.zip -d /tmp
+            /tmp/gradle-8.13/bin/gradle wrapper --gradle-version 8.13
+          fi
+          chmod +x gradlew
+
+      - name: Build debug APK
+        script: |
+          cd android
+          ./gradlew assembleDebug --stacktrace
+
+      - name: Build release AAB + APK (only if signing is configured)
+        script: |
+          cd android
+          if [ -n "$CM_KEYSTORE_PATH" ]; then
+            ./gradlew bundleRelease assembleRelease --stacktrace \
+              -PRELEASE_STORE_FILE="$CM_KEYSTORE_PATH" \
+              -PRELEASE_STORE_PASSWORD="$CM_KEYSTORE_PASSWORD" \
+              -PRELEASE_KEY_ALIAS="$CM_KEY_ALIAS" \
+              -PRELEASE_KEY_PASSWORD="$CM_KEY_PASSWORD"
+          else
+            echo "No release keystore configured (CM_KEYSTORE_PATH unset) -- skipping release build."
+            echo "This is expected until Android code signing is set up in Codemagic."
+          fi
+        ignore_failure: true
+
+    artifacts:
+      - android/app/build/outputs/apk/debug/app-debug.apk
+      - android/app/build/outputs/apk/release/app-release.apk
+      - android/app/build/outputs/bundle/release/app-release.aab
+
+    # No `publishing` block by default: Codemagic's schema rejects an email recipients
+    # list that resolves to an empty/undefined value (e.g. an unset $CM_EMAIL), which
+    # is exactly what broke this workflow before. To get build notifications, define a
+    # real CM_EMAIL variable in Codemagic (Settings > Environment variables) or hardcode
+    # a literal address, then add back:
+    #
+    # publishing:
+    #   email:
+    #     recipients:
+    #       - your-email@example.com
+    #     notify:
+    #       success: true
+    #       failure: true
